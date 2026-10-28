@@ -1,7 +1,7 @@
 name: Build iOS IPA
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   push:
     branches: [ main, master ]
 
@@ -33,17 +33,15 @@ jobs:
           if [ -f "www/reo.png" ]; then
             cp -f www/reo.png ios/App/App/Assets.xcassets/AppIcon.appiconset/App-Icon-1024x1024@1x.png 2>/dev/null || true
           fi
-          cat << 'EOF' >> ios/App/Podfile
-
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    target.build_configurations.each do |config|
-      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
-      config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'
-    end
-  end
-end
-EOF
+          echo "" >> ios/App/Podfile
+          echo "post_install do |installer|" >> ios/App/Podfile
+          echo "  installer.pods_project.targets.each do |target|" >> ios/App/Podfile
+          echo "    target.build_configurations.each do |config|" >> ios/App/Podfile
+          echo "      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'" >> ios/App/Podfile
+          echo "      config.build_settings['CODE_SIGNING_REQUIRED'] = 'NO'" >> ios/App/Podfile
+          echo "    end" >> ios/App/Podfile
+          echo "  end" >> ios/App/Podfile
+          echo "end" >> ios/App/Podfile
           npx cap sync ios
 
       - name: Build Xcode Archive (No Signing Required)
