@@ -74,20 +74,43 @@ const btnSearchLyricsManual = document.getElementById('btnSearchLyricsManual');
 const toast = document.getElementById('toastNotification');
 
 // ==================== CONFIG & SERVER URL ====================
+const DEFAULT_BACKEND_URL = 'http://vstavaydonbass.duckdns.org:8080';
+const DEFAULT_ACCOUNT_URL = 'http://vstavaydonbass.duckdns.org:8001';
+
+const BACKEND_CANDIDATES = [
+  'http://vstavaydonbass.duckdns.org:8080',
+  'http://192.168.1.102:8080',
+  'http://86.45.130.8:8080'
+];
+
+const ACCOUNT_CANDIDATES = [
+  'http://vstavaydonbass.duckdns.org:8001',
+  'http://192.168.1.102:8001',
+  'http://86.45.130.8:8001'
+];
+
 function getBackendUrl() {
   const saved = localStorage.getItem('reo_backend_url');
-  if (saved && saved.trim()) return saved.trim().replace(/\/+$/, '');
-  // Default to window.origin if served via HTTP, else default 8080
-  if (window.location.protocol.startsWith('http')) {
-    return window.location.origin.replace(/\/+$/, '');
+  if (saved && saved.trim()) {
+    const clean = saved.trim().replace(/\/+$/, '');
+    if (clean.includes('127.0.0.1') || clean.includes('localhost')) {
+      return DEFAULT_BACKEND_URL;
+    }
+    return clean;
   }
-  return 'http://127.0.0.1:8080';
+  return DEFAULT_BACKEND_URL;
 }
 
 function getAccountUrl() {
   const saved = localStorage.getItem('reo_account_url');
-  if (saved && saved.trim()) return saved.trim().replace(/\/+$/, '');
-  return 'http://127.0.0.1:8001';
+  if (saved && saved.trim()) {
+    const clean = saved.trim().replace(/\/+$/, '');
+    if (clean.includes('127.0.0.1') || clean.includes('localhost')) {
+      return DEFAULT_ACCOUNT_URL;
+    }
+    return clean;
+  }
+  return DEFAULT_ACCOUNT_URL;
 }
 
 function setBackendUrl(url) {
@@ -103,7 +126,6 @@ function setAccountUrl(url) {
 }
 
 async function testServerConnection() {
-  const url = getBackendUrl();
   if (statusDot) {
     statusDot.className = 'status-indicator-dot';
     statusText.textContent = 'Проверка...';
@@ -113,27 +135,40 @@ async function testServerConnection() {
     pingBadge.textContent = 'Подключение...';
   }
 
-  const startTime = performance.now();
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
-    const res = await fetch(`${url}/health`, { signal: controller.signal });
-    clearTimeout(timer);
-    const latency = Math.round(performance.now() - startTime);
+  const probeOne = async (target) => {
+    const startTime = performance.now();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${target}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        return { target, latency: Math.round(performance.now() - startTime) };
+      }
+    } catch (e) {}
+    return null;
+  };
 
-    if (res.ok) {
-      if (statusDot) {
-        statusDot.className = 'status-indicator-dot online';
-        statusText.textContent = `${latency} ms`;
-      }
-      if (pingBadge) {
-        pingBadge.className = 'setting-badge online';
-        pingBadge.textContent = `В сети (${latency} ms)`;
-      }
-      return true;
+  const current = getBackendUrl();
+  const pool = [current, ...BACKEND_CANDIDATES.filter(c => c !== current)];
+  const results = await Promise.all(pool.map(probeOne));
+  const successful = results.filter(r => r !== null).sort((a, b) => a.latency - b.latency);
+
+  if (successful.length > 0) {
+    const fastest = successful[0];
+    setBackendUrl(fastest.target);
+    const pairedAccount = fastest.target.replace(':8080', ':8001');
+    setAccountUrl(pairedAccount);
+
+    if (statusDot) {
+      statusDot.className = 'status-indicator-dot online';
+      statusText.textContent = `${fastest.latency} ms`;
     }
-  } catch (err) {
-    // Fail
+    if (pingBadge) {
+      pingBadge.className = 'setting-badge online';
+      pingBadge.textContent = `В сети (${fastest.latency} ms)`;
+    }
+    return true;
   }
 
   if (statusDot) {
@@ -145,6 +180,35 @@ async function testServerConnection() {
     pingBadge.textContent = 'Сервер недоступен';
   }
   return false;
+}
+
+// Universal fetch with automatic candidate failover for backend
+async function backendFetch(endpoint, options = {}) {
+  const current = getBackendUrl();
+  const pool = [current, ...BACKEND_CANDIDATES.filter(c => c !== current)];
+
+  let lastErr = null;
+  for (const base of pool) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(`${base}${endpoint}`, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      if (res.ok || (res.status >= 400 && res.status < 500)) {
+        if (base !== current) {
+          setBackendUrl(base);
+          const pairedAcc = base.replace(':8080', ':8001');
+          if (ACCOUNT_CANDIDATES.includes(pairedAcc)) {
+            setAccountUrl(pairedAcc);
+          }
+        }
+        return res;
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('Сервер недоступен');
 }
 
 // ==================== TOAST & HELPERS ====================
@@ -561,13 +625,11 @@ async function doSearch() {
   if (!query) return;
 
   searchResultsList.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Поиск...</span></div>';
-  const backend = getBackendUrl();
   const isRemix = activeFilter === 'remix';
   const sType = activeFilter === 'remix' ? 'tracks' : activeFilter;
 
   try {
-    const url = `${backend}/api/search?q=${encodeURIComponent(query)}&search_type=${sType}&remix=${isRemix}&limit=25`;
-    const res = await fetch(url);
+    const res = await backendFetch(`/api/search?q=${encodeURIComponent(query)}&search_type=${sType}&remix=${isRemix}&limit=25`);
     const data = await res.json();
     const tracks = data.tracks || [];
 
@@ -591,9 +653,8 @@ async function loadPopularTracks() {
   if (!container) return;
   container.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Загрузка...</span></div>';
 
-  const backend = getBackendUrl();
   try {
-    const res = await fetch(`${backend}/api/popular?limit=20`);
+    const res = await backendFetch('/api/popular?limit=20');
     const data = await res.json();
     const tracks = data.tracks || [];
 
@@ -638,11 +699,10 @@ async function fetchLyrics(artist, title, duration = 0) {
       } catch (e) {}
     }
 
-    const backend = getBackendUrl();
-    let url = `${backend}/api/lyrics?artist=${encodeURIComponent(searchArt)}&title=${encodeURIComponent(searchTit)}`;
-    if (duration > 0) url += `&duration=${Math.round(duration)}`;
+    let endpoint = `/api/lyrics?artist=${encodeURIComponent(searchArt)}&title=${encodeURIComponent(searchTit)}`;
+    if (duration > 0) endpoint += `&duration=${Math.round(duration)}`;
 
-    const res = await fetch(url);
+    const res = await backendFetch(endpoint);
     if (reqId !== currentLyricsReqId) return;
     const data = await res.json();
     if (reqId !== currentLyricsReqId) return;
@@ -789,9 +849,8 @@ if (btnSubmitLyricsModal) {
     btnSubmitLyricsModal.disabled = true;
     btnSubmitLyricsModal.textContent = 'Поиск...';
 
-    const backend = getBackendUrl();
     try {
-      const res = await fetch(`${backend}/api/lyrics?artist=${encodeURIComponent(art)}&title=${encodeURIComponent(tit)}`);
+      const res = await backendFetch(`/api/lyrics?artist=${encodeURIComponent(art)}&title=${encodeURIComponent(tit)}`);
       const data = await res.json();
       if (data && (data.synced || data.plain)) {
         const cur = state.currentTrack || {};
@@ -871,19 +930,30 @@ async function authFetch(endpoint, options = {}) {
     headers['Authorization'] = `Bearer ${authToken}`;
   }
 
-  const accountUrl = getAccountUrl();
-  const backendUrl = getBackendUrl();
-  const candidates = [
-    `${accountUrl}${endpoint}`,
-    `${backendUrl}/api/account${endpoint.replace(/^\/api\/account/, '')}`,
-    `${backendUrl}${endpoint}`
+  const currentAcc = getAccountUrl();
+  const pool = [
+    currentAcc,
+    ...ACCOUNT_CANDIDATES.filter(c => c !== currentAcc)
   ];
 
   let lastErr = null;
-  for (const targetUrl of candidates) {
+  for (const base of pool) {
     try {
-      const res = await fetch(targetUrl, { ...options, headers });
-      return res;
+      const targetUrl = `${base}${endpoint}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(targetUrl, { ...options, headers, signal: controller.signal });
+      clearTimeout(timer);
+      if (res.ok || (res.status >= 400 && res.status < 500)) {
+        if (base !== currentAcc) {
+          setAccountUrl(base);
+          const pairedBack = base.replace(':8001', ':8080');
+          if (BACKEND_CANDIDATES.includes(pairedBack)) {
+            setBackendUrl(pairedBack);
+          }
+        }
+        return res;
+      }
     } catch (e) {
       lastErr = e;
     }
@@ -1169,10 +1239,10 @@ if (btnTestServer) {
 }
 
 // ==================== INIT ====================
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   initAuth();
   loadFavorites();
-  testServerConnection();
+  await testServerConnection();
   loadPopularTracks();
   checkAuthOnStartup();
 });
